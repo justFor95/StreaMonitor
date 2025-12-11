@@ -520,8 +520,11 @@ class Bot(Thread):
                         self._consecutive_errors += 1
                         self._sleep(self.sleep_on_error)
                         continue
+                    else:
+                        # Reset error counter on any successful status check
+                        self._consecutive_errors = 0
 
-                    elif self.sc == Status.NOTEXIST:
+                    if self.sc == Status.NOTEXIST:
                         self.logger.error(f"❌ User {self.username} does not exist - auto-removing from configuration")
                         # Auto-remove the non-existent model from configuration
                         if Bot.auto_remove_model(self.username, self.site, "non-existent"):
