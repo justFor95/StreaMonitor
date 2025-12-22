@@ -35,6 +35,11 @@ class StripChat(Bot):
     # Pre-compiled regex patterns
     _DOPPIO_INDEX_PATTERN = re.compile(r'([0-9]+):"Doppio"')
     _DOPPIO_REQUIRE_PATTERN = re.compile(r'require\(["\']\./(Doppio[^"\']+\.js)["\']\)')
+    # New webpack chunk pattern: looks for DoppioWrapper being loaded from chunk
+    # Pattern: Promise.all([n.e(149),n.e(184)]).then(n.bind(n,4184))).DoppioWrapper
+    _DOPPIO_CHUNK_PATTERN = re.compile(r'n\.e\((\d+)\)\]\)\.then\(n\.bind\(n,\d+\)\)\)\.DoppioWrapper')
+    # Chunk hash mapping pattern: n.u=e=>"chunk-"+{149:"hash",184:"hash",...}[e]+".js"
+    _CHUNK_HASH_PATTERN = re.compile(r'n\.u=e=>"chunk-"\+\{([^}]+)\}\[e\]\+"\.js"')
     
     # Constants
     _MOUFLON_NEEDLE = "#EXT-X-MOUFLON:"
@@ -139,9 +144,25 @@ class StripChat(Bot):
         # Find Doppio JS file
         doppio_js_name = None
         
-        # Try direct require pattern first
+        # Try direct require pattern first (legacy)
         if match := cls._DOPPIO_REQUIRE_PATTERN.search(StripChat._main_js_data):
             doppio_js_name = match[1]
+        # Try new webpack chunk pattern: n.e(184)...DoppioWrapper
+        elif match := cls._DOPPIO_CHUNK_PATTERN.search(StripChat._main_js_data):
+            chunk_id = match[1]
+            # Find the chunk hash mapping
+            if hash_match := cls._CHUNK_HASH_PATTERN.search(StripChat._main_js_data):
+                chunk_mapping = hash_match[1]
+                # Parse the mapping to find the hash for our chunk_id
+                # Format: 149:"hash1",184:"hash2",...
+                for mapping in chunk_mapping.split(','):
+                    if ':' in mapping:
+                        cid, chash = mapping.split(':', 1)
+                        if cid.strip() == chunk_id:
+                            # Remove quotes from hash
+                            chash = chash.strip().strip('"')
+                            doppio_js_name = f"chunk-{chash}.js"
+                            break
         elif match := cls._DOPPIO_INDEX_PATTERN.search(StripChat._main_js_data):
             idx = match[1]
             # Look for hash in various formats
@@ -213,15 +234,15 @@ class StripChat(Bot):
     @classmethod
     def _extractNsKeys(cls, js_data):
         """
-        Extract pkey/pdkey from the ss/ns expression in Doppio JS.
+        Extract pkey/pdkey from the Jn/ss/ns expression in Doppio JS.
         
-        v2.1.1 key construction pattern:
-        - pkey: Z (16>>-13) + eechoej4 (1128328536208) + ale (IIFE) + eshi (690102)
-        - pdkey: uba (39286) + hjae (IIFE) + 7go (9672) + P (32>>-39) + oo (888) + di (IIFE) + 6
+        v2.1.3 key construction (const Jn=):
+        - pkey: IIFE(45,196,195,...) + 36918.toString(36) = "Zeechoej4aleeshi"
+        - pdkey: 0xaf004b1e62348.toString(36) + shifted(32) + 24.toString(36) + IIFE_first4 = "ubahjae7goPoodi6"
         
         The keys are built from:
         1. Fixed numbers converted to base36
-        2. Character shifts (-13 or -39)
+        2. Character shifts (-39)
         3. IIFE patterns with specific offsets
         """
         
@@ -238,6 +259,87 @@ class StripChat(Bot):
         def shift_chars(s, offset):
             return ''.join(chr(ord(c) + offset) for c in s)
         
+        def decode_iife_v213(args, offset=38):
+            """Decode v2.1.3 IIFE: first arg is offset, reverse remaining, then (a - first - offset) - i"""
+            first = args[0]
+            remaining = args[1:][::-1]
+            return ''.join(chr((a - first - offset) - i) for i, a in enumerate(remaining))
+        
+        def decode_iife_v213_pdkey(args, offset=39):
+            """Decode v2.1.3 pdkey IIFE: (a - first - offset) - i"""
+            first = args[0]
+            remaining = args[1:][::-1]
+            return ''.join(chr((a - first - offset) - i) for i, a in enumerate(remaining))
+        
+        # Check for v2.1.3 'const Jn=' pattern
+        if 'const Jn=' in js_data:
+            try:
+                start = js_data.find('const Jn=')
+                if start != -1:
+                    chunk = js_data[start:start+3000]
+                    
+                    # Find all IIFEs in the chunk - they appear as }(num,num,num,...)
+                    all_iifes = re.findall(r'\}\((\d+(?:,\d+)+)\)', chunk)
+                    iifes = []
+                    for iife_str in all_iifes:
+                        args = [int(x) for x in iife_str.split(',')]
+                        iifes.append(args)
+                    
+                    # First IIFE (14 args starting with ~45) is for pkey
+                    pkey_part1 = ''
+                    for args in iifes:
+                        if len(args) >= 10 and len(args) <= 16 and 40 <= args[0] <= 50:
+                            pkey_part1 = decode_iife_v213(args, 38)
+                            break
+                    
+                    # Find 36918.toString(36) for "shi"
+                    if '36918' in chunk:
+                        pkey_part2 = to_base36(36918)
+                    else:
+                        pkey_part2 = ''
+                    
+                    # Find the large hex number for pdkey: 0xaf004b1e62348 or decimal equivalent
+                    pdkey_part1 = ''
+                    hex_match = re.search(r'0x([0-9a-fA-F]+)', chunk)
+                    if hex_match:
+                        hex_val = int(hex_match.group(1), 16)
+                        pdkey_part1 = to_base36(hex_val)
+                    else:
+                        # Try decimal: look for large number > 100000000000
+                        for m in re.finditer(r'\b(\d{12,16})\b', chunk):
+                            n = int(m.group(1))
+                            if n > 100000000000:
+                                pdkey_part1 = to_base36(n)
+                                break
+                    
+                    # 32 shifted by -39 for 'P'
+                    pdkey_part2 = shift_chars(to_base36(32), -39) if '32' in chunk else ''
+                    
+                    # 24.toString(36) for 'o'
+                    pdkey_part3 = to_base36(24) if '24' in chunk else ''
+                    
+                    # Second IIFE (19-20 args starting with ~42) is for pdkey 'odi6' part
+                    pdkey_part4 = ''
+                    for args in iifes:
+                        if len(args) >= 18 and len(args) <= 22 and 40 <= args[0] <= 45:
+                            pdkey_part4 = decode_iife_v213_pdkey(args, 39)[:4]  # Only first 4 chars
+                            break
+                    
+                    pkey = pkey_part1 + pkey_part2
+                    pdkey = pdkey_part1 + pdkey_part2 + pdkey_part3 + pdkey_part4
+                    
+                    # Both keys should be 16 characters
+                    if len(pkey) == 16 and len(pdkey) == 16:
+                        print(f"[StripChat] Extracted v2.1.3 keys: pkey={pkey}, pdkey={pdkey}")
+                        return (pkey, pdkey)
+                    elif len(pkey) >= 12 and len(pdkey) >= 12:
+                        print(f"[StripChat] Partially extracted keys: pkey={pkey}({len(pkey)}), pdkey={pdkey}({len(pdkey)})")
+                        return (pkey, pdkey)
+                        
+            except Exception as e:
+                print(f"[StripChat] v2.1.3 key extraction failed: {e}")
+        
+        # Helper for older patterns
         def decode_iife(args, offset):
             """Decode IIFE: reverse args[1:], then (a - args[0] - offset) - i"""
             first = args[0]
