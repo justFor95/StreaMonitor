@@ -4,14 +4,14 @@ services:
 #    build: ./
 #    image: streamonitor:latest
 
-    image: ghcr.io/lossless1024/streamonitor:latest
+    image: ghcr.io/justfor95/streamonitor:latest
 
     restart: unless-stopped
     environment:
       # set timzeone
       #TZ: Etc/UTC
       # unset password (admin by default)
-      #STRMNTR_PASSWORD: ''
+      STRMNTR_PASSWORD: ''
       # unbind web interface (bound to 127.0.0.1 by default)
       STRMNTR_HOST: '0.0.0.0'
       # change confirm delete behavior: disable
@@ -26,9 +26,9 @@ services:
       # set refresh frequency on list page
       STRMNTR_LIST_FREQ: "30"
     volumes:
-      - ./downloads:/app/downloads
-      - ./config.json:/app/config.json
-      - ./stripchat_mouflon_keys.json:/app/stripchat_mouflon_keys.json
+      - ./streamonitor/downloads:/app/downloads
+      - ./streamonitor/config.json:/app/config.json
+      - ./streamonitor/stripchat_mouflon_keys.json:/app/stripchat_mouflon_keys.json
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
     ports:
