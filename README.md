@@ -95,6 +95,10 @@ When you set the WEBSERVER_HOST it is also accesible to from other computers in 
 You can run this application in docker. I prefer docker-compose so I included an example docker-compose.yml file that you can use.
 Simply start it in the folder with `docker-compose up`.
 
+need docker-compose.yml and config.json from repo
+
+`docker compose up -d`
+
 ## Configuration
 
 You can set some parameters in the [parameters.py](parameters.py).
