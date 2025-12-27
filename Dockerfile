@@ -19,6 +19,12 @@ RUN pip3 install -r requirements.txt
 COPY *.py ./
 COPY streamonitor ./streamonitor
 
+RUN addgroup -g 1000 appuser && \
+    adduser -u 1000 -G appuser -D -s /bin/sh appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
+
 EXPOSE 5000
 CMD [ "python3", "Downloader.py"]
 
