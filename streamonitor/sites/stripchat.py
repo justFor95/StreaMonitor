@@ -490,46 +490,69 @@ class StripChat(Bot):
         """
         Decode mouflon-protected m3u8 playlist.
         
-        Handles two formats:
-        1. Old format (FILE): #EXT-X-MOUFLON:FILE:<base64_encrypted> - needs decryption
-        2. New format (URI): #EXT-X-MOUFLON:URI:<actual_url> - URL is already in plaintext
+        The mouflon protection works by:
+        1. Adding #EXT-X-MOUFLON:URI:<url> lines with encoded segment paths
+        2. Using 'media.mp4' as a placeholder in the actual playlist
         
-        Both formats use 'media.mp4' as a placeholder that gets replaced.
+        The URL contains an encoded part (second-to-last underscore-separated segment)
+        that needs to be decoded using XOR with SHA256 hash of pdkey.
+        
+        Example:
+        - Original: https://.../<timestamp>_<encoded>_media.mp4
+        - Decoded:  https://.../<timestamp>_<decoded>_media.mp4
         """
-        _mouflon_file_attr = "#EXT-X-MOUFLON:FILE:"
         _mouflon_uri_attr = "#EXT-X-MOUFLON:URI:"
         _mouflon_filename = 'media.mp4'
 
         def _decode(encrypted_b64: str, key: str) -> str:
-            """Decode base64+XOR encrypted string (old format)."""
+            """
+            Decode the encrypted URL part using reversed base64 + XOR.
+            
+            The encryption is:
+            1. Original string -> base64 encode
+            2. Reverse the base64 string
+            3. XOR with SHA256 hash of the key (cycling)
+            
+            So decryption is:
+            1. XOR with SHA256 hash of the key
+            2. Decode as base64 (after reversing back)
+            """
             if cls._cached_keys is None:
                 cls._cached_keys = {}
-            hash_bytes = cls._cached_keys[key] if key in cls._cached_keys \
-                else cls._cached_keys.setdefault(key, hashlib.sha256(key.encode("utf-8")).digest())
-            encrypted_data = base64.b64decode(encrypted_b64 + "==")
-            return bytes(a ^ b for (a, b) in zip(encrypted_data, itertools.cycle(hash_bytes))).decode("utf-8")
+            hash_bytes = cls._cached_keys.get(key)
+            if hash_bytes is None:
+                hash_bytes = hashlib.sha256(key.encode("utf-8")).digest()
+                cls._cached_keys[key] = hash_bytes
+            
+            # The base64 is reversed, so reverse it back and add padding
+            encrypted_data = base64.b64decode(encrypted_b64[::-1] + '==')
+            # XOR decrypt
+            decoded_b64 = bytes(a ^ b for (a, b) in zip(encrypted_data, itertools.cycle(hash_bytes))).decode("utf-8")
+            return decoded_b64
 
         psch, pkey, pdkey = StripChat._getMouflonFromM3U(content)
 
         decoded = ''
         lines = content.splitlines()
-        last_decoded_file = None
+        last_decoded_uri = None
         
         for line in lines:
-            # New format: URI is already plaintext, just extract it
             if line.startswith(_mouflon_uri_attr):
-                last_decoded_file = line[len(_mouflon_uri_attr):].strip()
-            # Old format: needs base64+XOR decryption
-            elif line.startswith(_mouflon_file_attr):
-                try:
-                    last_decoded_file = _decode(line[len(_mouflon_file_attr):], pdkey)
-                except Exception as e:
-                    # Decryption failed - might be wrong key or format changed
-                    last_decoded_file = None
-            # Replace media.mp4 placeholder with actual URL
-            elif line.endswith(_mouflon_filename) and last_decoded_file:
-                decoded += last_decoded_file + '\n'
-                last_decoded_file = None
+                # Extract the URI and decode the encoded part
+                uri = line[len(_mouflon_uri_attr):]
+                # The encoded part is the second-to-last underscore-separated segment
+                # Format: https://.../<timestamp>_<encoded>_media.mp4
+                parts = uri.split('_')
+                if len(parts) >= 2:
+                    encoded_part = parts[-2]
+                    decoded_part = _decode(encoded_part, pdkey)
+                    last_decoded_uri = uri.replace(encoded_part, decoded_part)
+                else:
+                    last_decoded_uri = uri
+            elif line.endswith(_mouflon_filename) and last_decoded_uri:
+                # Replace the media.mp4 placeholder with the decoded URI
+                decoded += last_decoded_uri + '\n'
+                last_decoded_uri = None
             else:
                 decoded += line + '\n'
         
